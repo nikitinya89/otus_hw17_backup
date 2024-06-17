@@ -1,0 +1,91 @@
+---
+- hosts: all
+  become: true
+  gather_facts: no
+  tasks:
+    - name: install borg
+      apt:
+        name: borgbackup
+        state: present
+
+- hosts: backup
+  become: true
+  gather_facts: no
+  tasks:
+    - name: create borg user, mount disk
+      shell: useradd -m borg; \
+             mkdir /var/backup; \
+             mkfs.xfs /dev/sdb; \
+             mount /dev/sdb /var/backup; \
+             chown borg:borg /var/backup; \
+             mkdir ~borg/.ssh; \
+             touch ~borg/.ssh/authorized_keys; \
+             chown -R borg:borg ~borg/.ssh
+             chmod 700 ~borg/.ssh; \
+             chmod 600 ~borg/.ssh/authorized_keys;
+
+- hosts: client
+  become: true
+  gather_facts: no
+  tasks:
+    - name: ssh-keygen
+      shell: ssh-keygen -t rsa -N '' -f /root/.ssh/id_rsa <<< y; \
+             echo -e "Host 192.168.56.101\n   StrictHostKeyChecking accept-new" >> /root/.ssh/config
+      args:
+        executable: /bin/bash
+
+    - name: car ssh-key
+      shell: cat /root/.ssh/id_rsa.pub
+      register: ssh_key
+
+    - name: set fact ssh_key
+      set_fact:
+        client_ssh_key: "{{ ssh_key.stdout }}"
+
+- hosts: backup
+  become: true
+  gather_facts: no
+  tasks:
+    - name: add authorized key
+      authorized_key:
+        user: borg
+        key: "{{ hostvars['client']['client_ssh_key'] }}"
+
+- hosts: client
+  become: true
+  gather_facts: no
+  tasks:
+    - name: borg init repo
+      shell: borg init --encryption=repokey borg@192.168.56.101:/var/backup/; \
+      environment:
+        BORG_PASSPHRASE: "Qwerty123"
+
+    - name: copy borg backup service
+      copy:
+        src: borg.service
+        dest: /etc/systemd/system/
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: copy borg backup timer
+      copy:
+        src: borg.timer
+        dest: /etc/systemd/system/
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: start borg timer
+      systemd:
+        name: borg.timer
+        state: started
+        enabled: true
+        daemon_reload: true
+
+    - name: start borg service
+      systemd:
+        name: borg.service
+        state: started
+        enabled: true
+        daemon_reload: true
